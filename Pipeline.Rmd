@@ -1,0 +1,217 @@
+---
+title: "Dada2 Pipeline"
+author: "Meghan Craughwell"
+date: "2023-10-19"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load the necessary libraries
+```{r}
+library(dada2)
+library(phyloseq)
+library(Biostrings)
+library(ggplot2)
+library(tidyverse)
+```
+
+Make sure you have the reference database downloaded here https://benjjneb.github.io/dada2/training.html (Silva because this is 16S data)
+
+Set working directory and create object
+```{r}
+setwd("C:/Users/mcrau/Documents/Rwork/Assignment3")
+#create object for the files that you're working with
+path<-"C:/Users/mcrau/Documents/Rwork/Assignment3/Seq"
+list.files(path)
+```
+## Dada2 pipeline to identify taxa
+Match the forward and reverse data and change names
+```{r}
+## Forward and reverse fastq filenames have format: SAMPLENAME_R1_001.fastq and SAMPLENAME_R2_001.fastq
+#if file naming system is different, change the pattern parameter to match the new pattern
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq.gz", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq.gz", full.names = TRUE))
+# Extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq (strips the end of the file names off)
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+```
+
+Inspect the plots
+```{r}
+#visualize quality of the forward reads for the first 2 (subsetting the data but you can change this if you want to look at others)
+plotQualityProfile(fnFs[1:3])
+#visualize quality of the reverse reads
+plotQualityProfile(fnRs[1:3])
+```
+Create folders for filtered/trimmed data (not throwing out the original)
+```{r}
+# Place filtered files in filtered/ subdirectory
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+```
+Trim and specify truncLen c(x,x) according to cutoff values decided from plot for forward and reverse 
+**make sure to adjust values**
+```{r}
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(280,220),
+              maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
+              compress=TRUE, multithread=FALSE)
+```
+
+```{r}
+#shows how many sequences were trimmed out 
+head(out)
+#error rate for forward reads
+errF <- learnErrors(filtFs, multithread=FALSE)
+#error rate for reverse reads
+errR <- learnErrors(filtRs, multithread=FALSE)
+#plot the error rates
+plotErrors(errF, nominalQ=TRUE)
+```
+Determine how many unique reads for forward and reverse
+```{r}
+dadaFs <- dada(filtFs, err=errF, multithread=FALSE)
+dadaRs <- dada(filtRs, err=errR, multithread=FALSE)
+```
+
+Merge the paired reads
+```{r}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+# Inspect the merger data.frame from the first sample
+head(mergers[[1]])
+```
+
+Make a sequence table 
+```{r}
+seqtab <- makeSequenceTable(mergers)
+#look at the dimensions of table 
+dim(seqtab)
+# Inspect distribution of sequence lengths (sometimes you would remove outliers for length)
+table(nchar(getSequences(seqtab)))
+```
+
+Remove chimeras
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochim)
+#shows how many of the reads remain
+sum(seqtab.nochim)/sum(seqtab)
+```
+
+Show how many reads made it through each step of the pipeline
+```{r}
+#not necessary but nice to see 
+#and helpful if you lose a lot of sequences as you can see where things went wrong
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+# If processing a single sample, remove the sapply calls: e.g. replace sapply(dadaFs, getN) with getN(dadaFs)
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+```
+Assign taxonomy 
+```{r}
+#make sure to set directory and make sure file path is correct
+taxa <- assignTaxonomy(seqtab.nochim, "C:/Users/mcrau/Documents/Rwork/Dada2/silva_nr99_v138.1_train_set.fa.gz", multithread=FALSE)
+#show the taxonomic units tha that have been assigned 
+taxa.print <- taxa # Removing sequence rownames for display only
+rownames(taxa.print) <- NULL
+head(taxa.print)
+```
+Save data up to this point as csv files *(name appropriately)*
+
+Save the file with assigned taxonomy
+write.csv(taxa, file="C:/Users/mcrau/Documents/Rwork/Assignment3/Assignment3_taxa_take2.csv")
+Save the sequence file after trimming and chimeras removed
+write.csv(seqtab.nochim, file="C:/Users/mcrau/Documents/Rwork/Assignment3/Assignment3_seqtab_nochim_take2.csv")
+
+
+## Phyloseq before graphing
+Phyloseq only works with a matrix instead of a dataframe so convert this data (matrix contains only one class of data whereas a dataframe can contain multiple classes)
+```{r}
+seqtab.nochim<-as.matrix(seqtab.nochim)
+taxa<-as.matrix(taxa)
+```
+
+It is useful to have ASV abundance and taxa in the same csv file if you need to refer to it again 
+```{r}
+#transpose the seqtab.nochim data (but as a dataframe because when combining with taxa, there will be multiple data classes)
+flipped_seqtab.nochim<-as.data.frame(t(seqtab.nochim))
+```
+
+Merge the files (use the column bind function)
+```{r}
+ASV.taxa<-cbind(flipped_seqtab.nochim, taxa)
+```
+Save the file to computer *(name appropriately)*
+write.csv(ASV.taxa, file="C:/Users/mcrau/Documents/Rwork/Assignment3/Assignment3_ASV_taxa_take2.csv")
+
+## Graphing with GGplot2
+Make a dataframe (saying take row names aka sample names and make a dataframe)
+```{r}
+samples.out <- rownames(seqtab.nochim)
+samdf<-data.frame(samples.out)
+rownames(samdf)<-samples.out
+```
+
+Create phyloseq object 
+```{r}
+#specifying for phyloseq where to find abundance data, where to find taxa, where to find sample names
+ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), sample_data(samdf), tax_table(taxa))
+```
+
+Next step to use ASV instead of the super long sequence (not a necessary step to make graphs but nice to do) so it will just be ASV1, ASV2, etc. Strip the sequence away but this data will be stored
+```{r}
+dna <- Biostrings::DNAStringSet(taxa_names(ps))
+names(dna) <- taxa_names(ps)
+ps <- merge_phyloseq(ps, dna)
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))
+ps
+```
+To use ggplot, need to get data out of phyloseq and back to dataframe
+```{r}
+ps.table<-psmelt(ps)
+#need to factor the data in order to be able to graph it (want to graph phylum so factor phylum and put it back into the table where it was)
+ps.table$Phylum<-factor(ps.table$Phylum)
+```
+
+
+Currently have abundance within the samples, but they have different totals so it is difficult to compare between samples. Use relative abundance instead
+```{r}
+#use phyloseq (relative abundance is percentage of the total community)
+relative.abund<-transform_sample_counts(ps, function(OTU) OTU/sum(OTU))
+#back to a dataframe out of phyloseq
+ps.proptable<-psmelt(relative.abund)
+#factor phylum
+ps.proptable$Phylum<-factor(ps.proptable$Phylum)
+```
+
+Create a bar plot of realtive abundance by phylum
+```{r}
+ggplot(data=ps.proptable, mapping=aes(x=Sample, y=Abundance)) +geom_col(aes(fill=Phylum)) + labs(y="Relative Abundance",title="Relative Abundance of Bacterial and \nArchaeal Phyla in Active Layer",x= "Sample") + theme(plot.title = element_text(hjust = 0.5), legend.title=element_blank()) +
+scale_x_discrete(labels=c("Hummock","Negative \nControl","Trough"))
+```
+
+Create a bar graph of relative abundance by Order(do not have to factor Order before doing)
+```{r}
+ggplot(data=ps.proptable, mapping=aes(x=Sample, y=Abundance)) +geom_col(aes(fill=Order), position="fill") +theme(plot.title = element_text(hjust = 0.5), legend.title=element_blank(),legend.text=element_text(size=7),legend.key.height= unit(0.5, 'cm'),legend.key.width= unit(0.5, 'cm'))+ guides(fill = guide_legend(ncol = 5))        + labs(y="Relative Abundance",title="Relative Abundance of Bacterial and \nArchaeal Order in Active Layer",x= "Sample")   + scale_x_discrete(labels=c("Hummock","Negative \nControl","Trough"))
+```
+
+Find relative abundance (%) at phylum level and use psmelt to obtain data frame again
+```{r}
+phy <- ps %>% tax_glom(taxrank = "Phylum") %>% transform_sample_counts(function(x) {(x/sum(x))*100}) %>% psmelt()
+```
+
+Bubble plot using phylum relative abundance (%) with specified breaks in percentages
+```{r}
+ggplot(data = phy, aes(x=Sample, y=Phylum, size = Abundance, colour=Phylum)) +  geom_point(stroke = 0) +  scale_size_area( breaks = c(0.5, 1, 25, 50, 100),name = "relative abundance (%)") + guides(colour=FALSE) +                 labs(y="Phylum",title="Relative Abundance of Bacterial and \nArchaeal Phyla in Active Layer",x= "Sample")   + scale_x_discrete(labels=c("Hummock","Negative \nControl","Trough")) + theme(plot.title = element_text(hjust = 0.5))
+```
+
+Export all graphs to save as images 
+  
